@@ -117,16 +117,18 @@ void app_main()
 
     //Calculate clocks
     float frequency_dac = RTC_FAST_CLK_FREQ_APPROX / (1 + clk_8m_div) * (float) frequency_step / 65536;
-    float adc_sample_rate = 40000;
+    float adc_sample_rate = 80000;
 
     uint32_t samples_per_period = (uint32_t)(adc_sample_rate/frequency_dac);
     samples_per_period = round(samples_per_period / 2) * 2; //Round to nearest even integer.
+
+    ESP_LOGI(__func__, "samples_per_period: %d. adc_sample_rate: %.2f. frequency_dac: %.2f", samples_per_period, adc_sample_rate, frequency_dac);
 
     //Make sure adc_sample_len is even!? Since we have 2 channels. Need equal amount of samples per channel.
     uint32_t adc_sample_len = samples_per_period*2;     //sample 2 periods (for both channels)
     uint32_t adc_sample_len_bytes = sizeof(uint16_t) * adc_sample_len;
 
-    ESP_LOGI(__func__, "Setting up ADC samplig. Number of samples to take: %d", adc_sample_len);
+    ESP_LOGI(__func__, "Setting up ADC samplig. Number of samples to take: %d. Sample length bytes: %d", adc_sample_len, adc_sample_len_bytes);
 
     uint16_t *buf = malloc(adc_sample_len_bytes);
 
@@ -141,7 +143,7 @@ void app_main()
 
     while(1) {
 
-        for (size_t j = 10; j > 0; j--)
+        for (size_t j = 2; j > 0; j--)
         {
             ESP_LOGI(__func__, "Starting ADC sampling in %d", j);
             vTaskDelay(1000/portTICK_PERIOD_MS);
@@ -191,7 +193,7 @@ void app_main()
         printf("------------------------\n");
         memset(buf, 0, adc_sample_len_bytes);
 
-        vTaskDelay(10000/portTICK_PERIOD_MS);
+        vTaskDelay(1000/portTICK_PERIOD_MS);
     }
 error:
     while(1) vTaskDelay(1000/portTICK_PERIOD_MS);

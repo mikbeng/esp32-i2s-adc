@@ -126,7 +126,7 @@ esp_err_t i2s_adc_init(i2s_port_t i2s_num)
     I2S[i2s_num]->conf_chan.rx_chan_mod = 1;
     I2S[i2s_num]->pdm_conf.val = 0;
     I2S[i2s_num]->clkm_conf.clk_en = 1;
-    I2S[i2s_num]->sample_rate_conf.rx_bck_div_num = 20;
+    I2S[i2s_num]->sample_rate_conf.rx_bck_div_num = 20; //'M' coefficient in master receive mode
     //16 bit mode
     I2S[i2s_num]->sample_rate_conf.rx_bits_mod = 16;
     I2S[i2s_num]->conf.rx_start = 1;
@@ -154,6 +154,8 @@ static void IRAM_ATTR i2s_adc_isr(void *arg)
         if(p_i2s->cb) {
             p_i2s->cb(p_i2s->param);
         }
+
+
     }
     if (high_priority_task_awoken == pdTRUE) {
         portYIELD_FROM_ISR();
