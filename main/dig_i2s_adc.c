@@ -230,7 +230,7 @@ esp_err_t s_i2s_adc_dma_init(i2s_port_t i2s_num, size_t sample_len, size_t list_
 esp_err_t i2s_adc_init(i2s_adc_config_t *i2s_config, i2s_adc_handle_t* handle)
 {
     i2s_port_t i2s_num = i2s_config->i2s_num;
-    
+
     I2S_ADC_CHECK((i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
     if (i2s_num == I2S_NUM_1) {
         periph_module_enable(PERIPH_I2S1_MODULE);
@@ -278,6 +278,8 @@ esp_err_t i2s_adc_init(i2s_adc_config_t *i2s_config, i2s_adc_handle_t* handle)
     I2S[i2s_num]->sample_rate_conf.rx_bits_mod = 16;    //Set the bits to configure the bit length of I²S receiver channel.
     I2S[i2s_num]->conf.rx_start = 1;
     I2S_ADC_EXIT_CRITICAL(i2s_num);
+
+    *handle = 
     return ESP_OK;
 }
 
