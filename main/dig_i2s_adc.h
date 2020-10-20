@@ -7,10 +7,37 @@
 #include "esp_attr.h"
 #include "driver/periph_ctrl.h"
 #include "driver/adc.h"
+#include "driver/i2s.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+typedef struct
+{
+    i2s_port_t i2s_num;
+}i2s_adc_config_t;
+
+typedef struct
+{
+    lldesc_t*       descs;         //DMA Descriptors
+    intr_handle_t   dma_isr_handle;       //Interrupt handle for i2s dma
+    uint32_t        *dma_buffer;
+    uint32_t        buffer_len;
+    size_t          dma_list_num;
+}i2s_adc_dma_handle_t;
+
+typedef struct 
+{
+    i2s_dev_t* I2S[I2S_NUM_MAX];
+    i2s_isr_handle_t i2s_isr_handle;
+    SemaphoreHandle_t done_mux;
+    void *param;
+    adc_done_cb cb;
+    uint64_t conversion_time;
+    i2s_adc_dma_handle_t dma_handle;
+} i2s_adc_handle_t;
+
 
 typedef void (*adc_done_cb)(void *param);
 
