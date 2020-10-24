@@ -7,6 +7,7 @@
 #include "esp_attr.h"
 #include "driver/periph_ctrl.h"
 #include "driver/adc.h"
+#include "rom/lldesc.h"
 #include "driver/i2s.h"
 
 #ifdef __cplusplus
@@ -20,7 +21,7 @@ typedef struct
 
 typedef struct
 {
-    lldesc_t*       descs;         //DMA Descriptors
+    lldesc_t*       descs;                //DMA Descriptors
     intr_handle_t   dma_isr_handle;       //Interrupt handle for i2s dma
     uint32_t        *dma_buffer;
     uint32_t        buffer_len;
@@ -29,6 +30,7 @@ typedef struct
 
 typedef struct 
 {
+    i2s_port_t i2s_num;
     i2s_dev_t* I2S[I2S_NUM_MAX];
     i2s_isr_handle_t i2s_isr_handle;
     SemaphoreHandle_t done_mux;
@@ -36,8 +38,8 @@ typedef struct
     adc_done_cb cb;
     uint64_t conversion_time;
     i2s_adc_dma_handle_t dma_handle;
+    bool initiated;
 } i2s_adc_handle_t;
-
 
 typedef void (*adc_done_cb)(void *param);
 
@@ -68,7 +70,7 @@ esp_err_t i2s_adc_set_clk(i2s_port_t i2s_num, uint8_t clkm);
  *     - ESP_OK               Success
  *     - ESP_ERR_INVALID_ARG  Parameter error
  */
-esp_err_t i2s_adc_init(i2s_port_t i2s_num);
+esp_err_t i2s_adc_init(i2s_adc_handle_t* handle)
 
 /**
  * @brief Uninstall I2S ADC driver

@@ -11,7 +11,6 @@
 #include "soc/rtc.h"
 #include "soc/efuse_reg.h"
 #include "soc/syscon_struct.h"
-#include "rom/lldesc.h"
 #include "driver/gpio.h"
 #include "driver/i2s.h"
 #include "driver/rtc_io.h"
@@ -36,8 +35,8 @@
 
 static const char* I2S_ADC_TAG = "I2S ADC";
 static portMUX_TYPE i2s_adc_spinlock[I2S_NUM_MAX] = {portMUX_INITIALIZER_UNLOCKED, portMUX_INITIALIZER_UNLOCKED};
-static i2s_dev_t* I2S[I2S_NUM_MAX] = {&I2S0, &I2S1};
-static i2s_adc_handle_t* i2s_adc_obj[2] = {NULL, NULL};
+
+static i2s_adc_handle_t* i2s_adc_handle[2] = {NULL, NULL};
 
 extern void adc_power_always_on();
 
@@ -45,25 +44,34 @@ extern void adc_power_always_on();
 /* [PFUN] Private functions implementations                                  */
 /* ========================================================================= */
 
+//Out put WS signal from gpio4 (only for debug mode)
+static void s_i2s_adc_check_clk(void)
+{
+    //Todo. Connect to the used I2S port!
+    PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[4], PIN_FUNC_GPIO);
+    gpio_set_direction(4, GPIO_MODE_DEF_OUTPUT);
+    gpio_matrix_out(4, I2S0I_WS_OUT_IDX, 0, 0);
+}
+
 static void IRAM_ATTR s_i2s_adc_isr(void *arg)
 {
-    i2s_adc_obj_t *p_i2s = (i2s_adc_obj_t*) arg;
-    uint8_t i2s_num = p_i2s->i2s_num;
+    i2s_adc_handle_t *self = (i2s_adc_handle_t*) arg;
+    uint8_t i2s_num = self->i2s_num;
     portBASE_TYPE high_priority_task_awoken = 0;
-    uint32_t inr_st = I2S[i2s_num]->int_st.val;
+    uint32_t inr_st = self->I2S[i2s_num]->int_st.val;
     if(inr_st == 0) return;
     if (inr_st & (I2S_IN_DSCR_ERR_INT_ST_M || inr_st & I2S_IN_ERR_EOF_INT_ST_M)) {
         ESP_EARLY_LOGE(I2S_ADC_TAG, "dma error, interrupt status: 0x%08x", inr_st);
     }
     if (inr_st & I2S_IN_SUC_EOF_INT_ST_M) {
         #if LOG_CONV_TIME == 1
-            p_i2s->conversion_time = esp_timer_get_time() - conv_start_time;
+            self->conversion_time = esp_timer_get_time() - conv_start_time;
         #endif
-        I2S[i2s_num]->conf.rx_reset = 1;
-        I2S[i2s_num]->lc_conf.ahbm_fifo_rst = 1;
-        xSemaphoreGiveFromISR(p_i2s->done_mux, &high_priority_task_awoken);
-        if(p_i2s->cb) {
-            p_i2s->cb(p_i2s->param);
+        self->I2S[i2s_num]->conf.rx_reset = 1;
+        self->I2S[i2s_num]->lc_conf.ahbm_fifo_rst = 1;
+        xSemaphoreGiveFromISR(self->done_mux, &high_priority_task_awoken);
+        if(self->cb) {
+            self->cb(self->param);
         }
 
 
@@ -71,29 +79,110 @@ static void IRAM_ATTR s_i2s_adc_isr(void *arg)
     if (high_priority_task_awoken == pdTRUE) {
         portYIELD_FROM_ISR();
     }
-    I2S[i2s_num]->int_clr.val = inr_st;
+    self->I2S[i2s_num]->int_clr.val = inr_st;
 }
 
-esp_err_t s_i2s_adc_intr_ena(i2s_port_t i2s_num)
+static esp_err_t s_i2s_adc_intr_ena(i2s_adc_handle_t *self)
 {
-    I2S_ADC_CHECK((i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
-    I2S_ADC_ENTER_CRITICAL();
-    I2S[i2s_num]->int_ena.val = I2S_IN_DSCR_ERR_INT_ENA_M | I2S_IN_ERR_EOF_INT_ENA_M | I2S_IN_SUC_EOF_INT_ENA_M;
-    I2S_ADC_EXIT_CRITICAL();
+    I2S_ADC_CHECK((self->i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
+    I2S_ADC_ENTER_CRITICAL(self->i2s_num);
+    self->I2S[self->i2s_num]->int_ena.val = I2S_IN_DSCR_ERR_INT_ENA_M | I2S_IN_ERR_EOF_INT_ENA_M | I2S_IN_SUC_EOF_INT_ENA_M;
+    I2S_ADC_EXIT_CRITICAL(self->i2s_num);
     return ESP_OK;
 }
 
-esp_err_t s_i2s_adc_intr_dis(i2s_port_t i2s_num)
+static esp_err_t s_i2s_adc_intr_dis(i2s_adc_handle_t *self)
 {
-    I2S_ADC_CHECK((i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
-    I2S_ADC_ENTER_CRITICAL();
-    I2S[i2s_num]->int_ena.val = 0;
-    I2S[i2s_num]->int_clr.val = ~0;
-    I2S_ADC_EXIT_CRITICAL();
+    I2S_ADC_CHECK((self->i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
+    I2S_ADC_ENTER_CRITICAL(self->i2s_num);
+    self->I2S[self->i2s_num]->int_ena.val = 0;
+    self->I2S[self->i2s_num]->int_clr.val = ~0;
+    I2S_ADC_EXIT_CRITICAL(self->i2s_num);
     return ESP_OK;
 }
 
-esp_err_t s_i2s_adc_dma_init(i2s_port_t i2s_num, size_t sample_len, size_t list_num)
+static esp_err_t s_i2s_adc_setup_handle(i2s_adc_handle_t *self)
+{
+    ESP_LOGD(I2S_ADC_TAG, "Setting the handle to default state");
+
+    if(self == NULL) {
+        self = (i2s_adc_handle_t *)calloc(1, sizeof(i2s_adc_handle_t));
+        if(self == NULL){
+            ESP_LOGE(I2S_ADC_TAG, "failed to install i2s_adc handle");
+            s_i2s_adc_driver_uninstall(self);
+            return ESP_FAIL;
+        }
+    }
+    else {
+        ESP_LOGD(I2S_ADC_TAG, "driver aleardy installed");
+        return ESP_OK;
+    }
+
+    self->I2S[0] = &I2S0;
+    self->I2S[1] = &I2S1;
+
+    return ESP_OK;
+}
+
+static esp_err_t s_i2s_adc_set_clk(i2s_adc_handle_t *self, uint8_t clkm)
+{
+    I2S_ADC_CHECK((self->i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
+    I2S_ADC_ENTER_CRITICAL(self->i2s_num);
+    self->I2S[self->i2s_num]->clkm_conf.clka_en = 0;
+    self->I2S[self->i2s_num]->clkm_conf.clkm_div_a = 0;
+    self->I2S[self->i2s_num]->clkm_conf.clkm_div_b = 0;
+    self->I2S[self->i2s_num]->clkm_conf.clkm_div_num = clkm;
+    I2S_ADC_EXIT_CRITICAL(self->i2s_num);
+    return ESP_OK;
+}
+
+
+static esp_err_t s_i2s_adc_driver_uninstall(i2s_adc_handle_t *self)
+{
+    I2S_ADC_CHECK((self->i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
+    if(self != NULL) {
+        s_i2s_adc_intr_dis(self->i2s_num);
+        if (self->i2s_num == I2S_NUM_0) {
+            periph_module_disable(PERIPH_I2S0_MODULE);
+        } else if (self->i2s_num == I2S_NUM_1) {
+            periph_module_disable(PERIPH_I2S1_MODULE);
+        }
+        if(self->done_mux) {
+            vSemaphoreDelete(self->done_mux); 
+        }
+        esp_intr_free(self->i2s_isr_handle);
+        free(self);
+    }
+    return ESP_OK;
+}
+
+static esp_err_t s_i2s_adc_driver_install(i2s_adc_handle_t *self, adc_done_cb cb, void *param)
+{
+    I2S_ADC_CHECK((self->i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
+
+    self->done_mux = xSemaphoreCreateMutex();
+    xSemaphoreTake(self->done_mux, portMAX_DELAY);
+    if(self->done_mux == NULL){
+        ESP_LOGE(I2S_ADC_TAG, "failed to retrieve done_mux");
+        s_i2s_adc_driver_uninstall(self);
+        return ESP_FAIL;       
+    }
+    self->param = param;
+    self->dma_handle.descs->owner = 1;
+    self->dma_handle.descs->eof = 0;
+    self->dma_handle.descs->sosf = 0;
+    self->dma_handle.descs->length = 0;
+    self->dma_handle.descs->size = 0;
+    self->dma_handle.descs->buf = NULL;
+    self->dma_handle.descs->offset = 0;
+    self->dma_handle.descs->empty = NULL;
+    self->cb = cb;
+    self->param = param;
+    s_i2s_adc_intr_ena(self->i2s_num);
+    return esp_intr_alloc(ETS_I2S0_INTR_SOURCE + self->i2s_num, 0, &s_i2s_adc_isr, (void *)self, &(self->i2s_isr_handle));
+}
+
+static esp_err_t s_i2s_adc_dma_init(i2s_adc_handle_t *self, size_t sample_len, size_t list_num)
 {
 
     //sample_len is the length of the rx buffer for each dma transfer. 
@@ -175,6 +264,100 @@ esp_err_t s_i2s_adc_dma_init(i2s_port_t i2s_num, size_t sample_len, size_t list_
     return ESP_OK;
 }
 
+
+
+static esp_err_t s_i2s_adc_init(i2s_adc_config_t *i2s_config, i2s_adc_handle_t *self)
+{
+    esp_err_t ret;
+
+    s_i2s_adc_setup_handle(self);
+
+    self->i2s_num = i2s_config->i2s_num;
+
+    I2S_ADC_CHECK((self->i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
+    if (self->i2s_num == I2S_NUM_1) {
+        periph_module_enable(PERIPH_I2S1_MODULE);
+    } else {
+        periph_module_enable(PERIPH_I2S0_MODULE);
+    }
+
+    adc_power_always_on();
+    I2S_ADC_ENTER_CRITICAL(self->i2s_num);
+
+    //Disable interrupt
+    self->I2S[self->i2s_num]->int_ena.val = 0;
+    self->I2S[self->i2s_num]->int_clr.val = ~0;
+    self->I2S[self->i2s_num]->conf.val = 0;
+    self->I2S[self->i2s_num]->conf.rx_reset = 1;
+    self->I2S[self->i2s_num]->conf.rx_reset = 0;
+    self->I2S[self->i2s_num]->conf.rx_msb_right = 1;    //Set this to place right-channel data at the MSB in the receive FIFO.
+    self->I2S[self->i2s_num]->conf.rx_right_first = 0;  //Set this bit to receive right-channel data first.
+    //Reset fifio
+    self->I2S[self->i2s_num]->conf.rx_fifo_reset = 1;
+    self->I2S[self->i2s_num]->conf.rx_fifo_reset = 0;
+    //Disable pcm
+    self->I2S[self->i2s_num]->conf1.rx_pcm_bypass = 1;  //set this bit to bypass the Compress/Decompress module for the received data.
+    //Enable and configure DMA
+    self->I2S[self->i2s_num]->lc_conf.val = 0;
+    self->I2S[self->i2s_num]->lc_conf.ahbm_fifo_rst = 1;
+    self->I2S[self->i2s_num]->lc_conf.ahbm_fifo_rst = 0;
+    self->I2S[self->i2s_num]->lc_conf.ahbm_rst = 1;
+    self->I2S[self->i2s_num]->lc_conf.ahbm_rst = 0;
+    self->I2S[self->i2s_num]->lc_conf.in_rst = 1;
+    self->I2S[self->i2s_num]->lc_conf.in_rst = 0;
+    self->I2S[self->i2s_num]->lc_conf.indscr_burst_en = 1;
+    //Enable paral mode
+    self->I2S[self->i2s_num]->conf2.val = 0;
+    self->I2S[self->i2s_num]->conf2.lcd_en = 1;
+    //Configure fifo
+    self->I2S[self->i2s_num]->fifo_conf.val = 0;
+    self->I2S[self->i2s_num]->fifo_conf.rx_fifo_mod = 1;    //16-bit single channel data (mode 1) p.315
+    self->I2S[self->i2s_num]->fifo_conf.rx_data_num = 32;
+    self->I2S[self->i2s_num]->fifo_conf.rx_fifo_mod_force_en = 1;   //The bit should always be set to 1.
+    self->I2S[self->i2s_num]->fifo_conf.dscr_en = 1;//connect dma to fifo
+    self->I2S[self->i2s_num]->conf_chan.rx_chan_mod = 1;
+    self->I2S[self->i2s_num]->pdm_conf.val = 0;
+    self->I2S[self->i2s_num]->clkm_conf.clk_en = 1;
+    self->I2S[self->i2s_num]->sample_rate_conf.rx_bck_div_num = 20; //'M' coefficient in master receive mode
+    //16 bit mode
+    self->I2S[self->i2s_num]->sample_rate_conf.rx_bits_mod = 16;    //Set the bits to configure the bit length of I²S receiver channel.
+    self->I2S[self->i2s_num]->conf.rx_start = 1;
+    I2S_ADC_EXIT_CRITICAL(self->i2s_num);
+
+
+    //Configuring scan channels
+    adc_channel_t channel[] = {
+        ADC1_CHANNEL_7,
+        ADC1_CHANNEL_6,
+    };
+    ret = adc_i2s_scale_mode_init(ADC_UNIT_1, channel, 2);
+    if (ret != ESP_OK)
+    {
+		ESP_LOGE(__func__, "adc_i2s_scale_mode_init(): returned %d", ret);
+        return ESP_FAIL;
+    }
+
+    ret = s_i2s_adc_set_clk(self, 100);
+    if (ret != ESP_OK)
+    {
+		ESP_LOGE(__func__, "s_i2s_adc_set_clk(): returned %d", ret);
+        return ESP_FAIL;
+    }
+
+    ret = s_i2s_adc_driver_install(self, NULL, NULL) != ESP_OK)
+    if (ret != ESP_OK)
+    {
+		ESP_LOGE(__func__, "s_i2s_adc_driver_install(): returned %d", ret);
+        return ESP_FAIL;
+    }
+
+    //Uncomment this line only in debug mode.
+    s_i2s_adc_check_clk();   
+
+    return ESP_OK;
+}
+
+
 // esp_err_t s_i2s_adc_get_dma_rxdata(mspi_transaction_t *mspi_trans_p, mspi_device_handle_t handle)
 // {
 //     if(handle->initiated == false){
@@ -227,133 +410,31 @@ esp_err_t s_i2s_adc_dma_init(i2s_port_t i2s_num, size_t sample_len, size_t list_
 /* [FUNC] Functions implementations                                          */
 /* ========================================================================= */
 
-esp_err_t i2s_adc_init(i2s_adc_config_t *i2s_config, i2s_adc_handle_t* handle)
+esp_err_t i2s_adc_init(i2s_adc_handle_t* handle)
 {
-    i2s_port_t i2s_num = i2s_config->i2s_num;
+    esp_err_t ret = ESP_OK;
+    i2s_adc_config_t config;
+    config.i2s_num = I2S_NUM_0;
 
-    I2S_ADC_CHECK((i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
-    if (i2s_num == I2S_NUM_1) {
-        periph_module_enable(PERIPH_I2S1_MODULE);
-    } else {
-        periph_module_enable(PERIPH_I2S0_MODULE);
+    handle = i2s_adc_handle[0];
+
+    ret = s_i2s_adc_init(&config, handle);
+    if (ret != ESP_OK)
+    {
+		ESP_LOGE(__func__, "s_i2s_adc_init(): returned %d", ret);
+        return ESP_FAIL;
     }
-    adc_power_always_on();
-    I2S_ADC_ENTER_CRITICAL(i2s_num);
-    //Disable interrupt
-    I2S[i2s_num]->int_ena.val = 0;
-    I2S[i2s_num]->int_clr.val = ~0;
-    I2S[i2s_num]->conf.val = 0;
-    I2S[i2s_num]->conf.rx_reset = 1;
-    I2S[i2s_num]->conf.rx_reset = 0;
-    I2S[i2s_num]->conf.rx_msb_right = 1;    //Set this to place right-channel data at the MSB in the receive FIFO.
-    I2S[i2s_num]->conf.rx_right_first = 0;  //Set this bit to receive right-channel data first.
-    //Reset fifio
-    I2S[i2s_num]->conf.rx_fifo_reset = 1;
-    I2S[i2s_num]->conf.rx_fifo_reset = 0;
-    //Disable pcm
-    I2S[i2s_num]->conf1.rx_pcm_bypass = 1;  //set this bit to bypass the Compress/Decompress module for the received data.
-    //Enable and configure DMA
-    I2S[i2s_num]->lc_conf.val = 0;
-    I2S[i2s_num]->lc_conf.ahbm_fifo_rst = 1;
-    I2S[i2s_num]->lc_conf.ahbm_fifo_rst = 0;
-    I2S[i2s_num]->lc_conf.ahbm_rst = 1;
-    I2S[i2s_num]->lc_conf.ahbm_rst = 0;
-    I2S[i2s_num]->lc_conf.in_rst = 1;
-    I2S[i2s_num]->lc_conf.in_rst = 0;
-    I2S[i2s_num]->lc_conf.indscr_burst_en = 1;
-    //Enable paral mode
-    I2S[i2s_num]->conf2.val = 0;
-    I2S[i2s_num]->conf2.lcd_en = 1;
-    //Configure fifo
-    I2S[i2s_num]->fifo_conf.val = 0;
-    I2S[i2s_num]->fifo_conf.rx_fifo_mod = 1;    //16-bit single channel data (mode 1) p.315
-    I2S[i2s_num]->fifo_conf.rx_data_num = 32;
-    I2S[i2s_num]->fifo_conf.rx_fifo_mod_force_en = 1;   //The bit should always be set to 1.
-    I2S[i2s_num]->fifo_conf.dscr_en = 1;//connect dma to fifo
-    I2S[i2s_num]->conf_chan.rx_chan_mod = 1;
-    I2S[i2s_num]->pdm_conf.val = 0;
-    I2S[i2s_num]->clkm_conf.clk_en = 1;
-    I2S[i2s_num]->sample_rate_conf.rx_bck_div_num = 20; //'M' coefficient in master receive mode
-    //16 bit mode
-    I2S[i2s_num]->sample_rate_conf.rx_bits_mod = 16;    //Set the bits to configure the bit length of I²S receiver channel.
-    I2S[i2s_num]->conf.rx_start = 1;
-    I2S_ADC_EXIT_CRITICAL(i2s_num);
-
-    *handle = 
-    return ESP_OK;
+ 
 }
 
-esp_err_t i2s_adc_set_clk(i2s_port_t i2s_num, uint8_t clkm)
+esp_err_t i2s_adc_start(i2s_adc_handle_t* self, void *buf, size_t len)
 {
-    I2S_ADC_CHECK((i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
-    I2S_ADC_ENTER_CRITICAL();
-    I2S[i2s_num]->clkm_conf.clka_en = 0;
-    I2S[i2s_num]->clkm_conf.clkm_div_a = 0;
-    I2S[i2s_num]->clkm_conf.clkm_div_b = 0;
-    I2S[i2s_num]->clkm_conf.clkm_div_num = clkm;
-    I2S_ADC_EXIT_CRITICAL();
-    return ESP_OK;
-}
+    I2S_ADC_CHECK((self->i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
 
-esp_err_t i2s_adc_driver_uninstall(i2s_port_t i2s_num)
-{
-    I2S_ADC_CHECK((i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
-    if(i2s_adc_obj[i2s_num] != NULL) {
-        s_i2s_adc_intr_dis(i2s_num);
-        if (i2s_num == I2S_NUM_0) {
-            periph_module_disable(PERIPH_I2S0_MODULE);
-        } else if (i2s_num == I2S_NUM_1) {
-            periph_module_disable(PERIPH_I2S1_MODULE);
-        }
-        if(i2s_adc_obj[i2s_num]->done_mux) {
-            vSemaphoreDelete(i2s_adc_obj[i2s_num]->done_mux); 
-        }
-        esp_intr_free(i2s_adc_obj[i2s_num]->i2s_isr_handle);
-        free(i2s_adc_obj[i2s_num]);
-    }
-    return ESP_OK;
-}
-
-esp_err_t i2s_adc_driver_install(i2s_port_t i2s_num, adc_done_cb cb, void *param)
-{
-    I2S_ADC_CHECK((i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
-    if(i2s_adc_obj[i2s_num] == NULL) {
-        i2s_adc_obj[i2s_num] = (i2s_adc_obj_t *)calloc(1, sizeof(i2s_adc_obj_t));
-        if(i2s_adc_obj[i2s_num] == NULL) goto exit;
-        i2s_adc_obj[i2s_num]->i2s_num = i2s_num;
-        i2s_adc_obj[i2s_num]->done_mux = xSemaphoreCreateMutex();
-        xSemaphoreTake(i2s_adc_obj[i2s_num]->done_mux, portMAX_DELAY);
-        if(i2s_adc_obj[i2s_num]->done_mux == NULL)goto exit;
-        i2s_adc_obj[i2s_num]->param = param;
-        i2s_adc_obj[i2s_num]->desc.owner = 1;
-        i2s_adc_obj[i2s_num]->desc.eof = 0;
-        i2s_adc_obj[i2s_num]->desc.sosf = 0;
-        i2s_adc_obj[i2s_num]->desc.length = 0;
-        i2s_adc_obj[i2s_num]->desc.size = 0;
-        i2s_adc_obj[i2s_num]->desc.buf = NULL;
-        i2s_adc_obj[i2s_num]->desc.offset = 0;
-        i2s_adc_obj[i2s_num]->desc.empty = NULL;
-        i2s_adc_obj[i2s_num]->cb = cb;
-        i2s_adc_obj[i2s_num]->param = param;
-        s_i2s_adc_intr_ena(i2s_num);
-        return esp_intr_alloc(ETS_I2S0_INTR_SOURCE + i2s_num, 0, &s_i2s_adc_isr, (void *)i2s_adc_obj[i2s_num], &(i2s_adc_obj[i2s_num]->i2s_isr_handle));
-    } else {
-        ESP_LOGD(I2S_ADC_TAG, "driver aleardy installed");
-        return ESP_OK;
-    }
-exit:
-    ESP_LOGE(I2S_ADC_TAG, "failed to install i2s adc driver");
-    i2s_adc_driver_uninstall(i2s_num);
-    return ESP_FAIL;
-}
-
-esp_err_t i2s_adc_start(i2s_port_t i2s_num, void *buf, size_t len)
-{
-    I2S_ADC_CHECK((i2s_num < I2S_NUM_MAX), "i2s_num error", ESP_ERR_INVALID_ARG);
-    I2S_ADC_CHECK((i2s_adc_obj[i2s_num] != NULL), "driver not installed", ESP_ERR_INVALID_ARG);
+    I2S_ADC_CHECK((self != NULL), "driver not installed", ESP_ERR_INVALID_ARG);
     I2S_ADC_CHECK((buf != NULL), "buffer null", ESP_ERR_INVALID_ARG);
 
-    s_i2s_adc_dma_init(i2s_num, len);
+    s_i2s_adc_dma_init(self, len, 1);
     // uint32_t rd_len = (len >> 2) << 2;
     // //Configure DMA link
     // i2s_adc_obj[i2s_num]->desc.owner = 1;
@@ -363,15 +444,15 @@ esp_err_t i2s_adc_start(i2s_port_t i2s_num, void *buf, size_t len)
     // i2s_adc_obj[i2s_num]->desc.buf = (uint8_t *)buf;
 
 
-    I2S_ADC_ENTER_CRITICAL();
+    I2S_ADC_ENTER_CRITICAL(self->i2s_num);
     //Reset adc scan table pointer
     SYSCON.saradc_ctrl.sar1_patt_p_clear = 1;
-    I2S[i2s_num]->lc_conf.ahbm_fifo_rst = 0;
+    self->I2S[self->i2s_num]->lc_conf.ahbm_fifo_rst = 0;
     //I2S[i2s_num]->lc_conf.in_rst = 0;
-    I2S[i2s_num]->conf.rx_reset = 0;
+    self->I2S[self->i2s_num]->conf.rx_reset = 0;
     //Set up DMA link
-    I2S[i2s_num]->in_link.addr = &i2s_adc_obj[i2s_num]->desc;
-    I2S[i2s_num]->rx_eof_num = rd_len / 4;
+    self->I2S[self->i2s_num]->in_link.addr = &i2s_adc_obj[i2s_num]->desc;
+    self->I2S[self->i2s_num]->rx_eof_num = rd_len / 4;
     SYSCON.saradc_ctrl.sar1_patt_p_clear = 0;
     //Start receive ADC data
     I2S[i2s_num]->in_link.start = 1;

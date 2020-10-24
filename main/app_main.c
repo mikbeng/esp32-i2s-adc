@@ -10,8 +10,6 @@
 #include "dig_i2s_adc.h"
 #include "dac-cosine.h"
 
-#define I2S_ADC_UNIT            (ADC_UNIT_1)
-
 float ch6_samples[1000] = {0};
 float ch7_samples[1000] = {0};
 
@@ -28,46 +26,6 @@ WS    __|  |___|  |___|  |___|  |___|  |___|  |___|  |___|  |___|  |__
 receive buffer: [ CH0 ][ CH3 ][ CH6 ][ CH7 ]...
 
 */
-
-//Out put WS signal from gpio18(only for debug mode)
-void i2s_adc_check_clk(void)
-{
-    PIN_FUNC_SELECT(GPIO_PIN_MUX_REG[4], PIN_FUNC_GPIO);
-    gpio_set_direction(4, GPIO_MODE_DEF_OUTPUT);
-    gpio_matrix_out(4, I2S0I_WS_OUT_IDX, 0, 0);
-}
-
-esp_err_t i2s_adc_setup(void)
-{
-    // adc_channel_t channel[] = {
-    //     ADC1_CHANNEL_3,
-    //     ADC1_CHANNEL_0,
-    //     ADC1_CHANNEL_7,
-    //     ADC1_CHANNEL_6,
-    // };
-    adc_channel_t channel[] = {
-        ADC1_CHANNEL_7,
-        ADC1_CHANNEL_6,
-    };
-    if (i2s_adc_init(I2S_NUM_0) != ESP_OK) {
-        printf("i2s adc init fail\n");
-        return ESP_FAIL;
-    }
-    //Configuring scan channels
-    //adc_i2s_scale_mode_init(I2S_ADC_UNIT, channel, 4);
-    adc_i2s_scale_mode_init(I2S_ADC_UNIT, channel, 2);
-    //rate = 2M
-    //ADC sampling rate = 4000,000 / clkm_num (4,000,000 should be divisible by clkm_num)
-    // 40kHz = 4Mhz/100. That should be 20kHz per channel
-    i2s_adc_set_clk(I2S_NUM_0, 100);
-    if (i2s_adc_driver_install(I2S_NUM_0, NULL, NULL) != ESP_OK){
-        printf("driver install fail\n");
-        return ESP_FAIL;
-    }
-    //Uncomment this line only in debug mode.
-    i2s_adc_check_clk();
-    return ESP_OK;
-}
 
 /*
  * Main task that let you test CW parameters in action
@@ -136,10 +94,15 @@ void app_main()
         printf("buffer malloc fail\n");
         goto error;
     }
-    if (i2s_adc_setup() != ESP_OK) {
+
+    i2s_adc_handle_t* i2s_adc_handle;
+
+
+    if (i2s_adc_init(i2s_adc_handle) != ESP_OK) {
         printf("i2s adc setup fail\n");
         goto error;
     }
+
 
     while(1) {
 
@@ -149,7 +112,7 @@ void app_main()
             vTaskDelay(1000/portTICK_PERIOD_MS);
         }
 
-        if (i2s_adc_start(I2S_NUM_0, buf, adc_sample_len_bytes) != ESP_OK) {
+        if (i2s_adc_start(i2s_adc_handle, buf, adc_sample_len_bytes) != ESP_OK) {
             goto error;
         }
 
